@@ -30,6 +30,7 @@ from tqdm.auto import tqdm
 import wandb
 
 from diffusers import DDPMScheduler
+from concurrent.futures import ThreadPoolExecutor
 
 # 导入我们定义的条件扩散模型
 from my_hidden_state_diffusion import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
@@ -54,10 +55,11 @@ class ChainedHiddenStateBatchDataset(Dataset):
     各自拼接成一个按顺序的长序列。
     """
 
-    def __init__(self, paths, chunk_size):
+    def __init__(self, paths, chunk_size, num_workers=8):
         """
-        :param paths: 单个文件列表，每个文件包含 {"draft_hidden", "hidden_state"} 两个键
+        :param paths: 文件路径列表，每个文件包含 {"draft_hidden", "hidden_state"} 两个键
         :param chunk_size: 训练时每个 batch 需要的连续长度
+        :param num_workers: 多线程加载文件时使用的线程数
         """
         super().__init__()
         self.paths = paths
@@ -67,11 +69,19 @@ class ChainedHiddenStateBatchDataset(Dataset):
         self.file_lengths = []
         self.cumulative_lengths = []
         cumulative = 0
-        print("count data total_length...")
-        for p in tqdm(self.paths):
-            data = torch.load(p)
+
+        print("Counting data total_length with multi-threading...")
+
+        def get_file_length(p):
+            # 只加载CPU版本，减少内存占用
+            data = torch.load(p, map_location="cpu")
             # 假设 draft_hidden 与 hidden_state 的长度相同
-            length = data["draft_hidden"].shape[0]
+            return data["draft_hidden"].shape[0]
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            file_lengths = list(tqdm(executor.map(get_file_length, self.paths), total=len(self.paths)))
+        
+        for length in file_lengths:
             self.file_lengths.append(length)
             cumulative += length
             self.cumulative_lengths.append(cumulative)
