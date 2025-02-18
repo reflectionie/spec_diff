@@ -1,5 +1,12 @@
 #!/usr/bin/env python
 # coding=utf-8
+"""
+python train_hidden_state_diffuser.py \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --checkpointing_steps 1000
+
+"""
 
 import argparse
 import logging
