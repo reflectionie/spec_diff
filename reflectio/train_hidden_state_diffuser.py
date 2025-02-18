@@ -55,7 +55,7 @@ class ChainedHiddenStateBatchDataset(Dataset):
     各自拼接成一个按顺序的长序列。
     """
 
-    def __init__(self, paths, chunk_size, num_workers=10):
+    def __init__(self, paths, chunk_size, num_workers=40):
         """
         :param paths: 文件路径列表，每个文件包含 {"draft_hidden", "hidden_state"} 两个键
         :param chunk_size: 训练时每个 batch 需要的连续长度
@@ -275,7 +275,7 @@ def main():
     model = HiddenStateDiffusionModel(hidden_dim=args.hidden_dim, time_embed_dim=args.time_embed_dim)
 
     # 参数数量
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.gtiparameters() if p.requires_grad)
     logger.info(f"Total training parameters: {total_params/1e9:.4f}B")
 
     model.train()
