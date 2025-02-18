@@ -290,7 +290,6 @@ def main():
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
 
-    global_step = 0
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Training")
 
@@ -328,7 +327,11 @@ def main():
         logger.info("LM Head evaluation disabled (no basepath provided).")
 
     # ========== 训练 ==========
-    for epoch in tqdm(range(args.num_train_epochs)):
+    global_step = 0
+    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar.set_description("Training")
+
+    for epoch in range(args.num_train_epochs):
         model.train()
         for step, batch in enumerate(train_dataloader):
             x_draft = batch["draft"]
@@ -336,105 +339,133 @@ def main():
             bsz = x_gt.size(0)
 
             with accelerator.accumulate(model):
+                # 1. 取时间步、加噪
                 timesteps = torch.randint(0, num_train_timesteps, (bsz,), device=x_gt.device)
                 noise = torch.randn_like(x_gt)
                 x_noisy = noise_scheduler.add_noise(x_gt, noise, timesteps)
 
-                output = model(sample=x_noisy, timestep=timesteps, draft=x_draft, return_dict=True)
+                # 2. 前向与损失
+                output = model(
+                    sample=x_noisy,
+                    timestep=timesteps,
+                    draft=x_draft,
+                    return_dict=True
+                )
                 predicted_gt = output.sample
                 loss = F.mse_loss(predicted_gt, x_gt.to(predicted_gt.dtype))
 
+                # 3. 反向与优化
                 accelerator.backward(loss)
                 optimizer.step()
                 optimizer.zero_grad()
 
+            # 只有在同步梯度时才更新进度与 global_step
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                # 记录训练loss
                 if accelerator.is_main_process:
                     wandb.log({"train_loss": loss.item(), "global_step": global_step})
 
+                # ========== 【修改点】按checkpointing_steps进行验证和保存 ==========
+                if global_step % args.checkpointing_steps == 0:
+                    # 验证
+                    model.eval()
+                    val_loss = 0.0
+                    val_samples = 0
+
+                    top1_in_top1_sum = 0.0
+                    top1_in_top2_sum = 0.0
+                    top1_in_top3_sum = 0.0
+
+                    with torch.no_grad():
+                        for val_batch in val_dataloader:
+                            x_draft_val = val_batch["draft"]
+                            x_gt_val = val_batch["gt"]
+                            bsz_val = x_draft_val.size(0)
+
+                            # 推理
+                            pred_gt = inference_pipeline(
+                                draft_hidden=x_draft_val,
+                                noise_scheduler=noise_scheduler,
+                                model=model,
+                                device=x_draft_val.device,
+                                num_inference_steps=num_train_timesteps,
+                            )
+
+                            # 验证loss
+                            loss_val = F.mse_loss(pred_gt, x_gt_val)
+                            val_loss += loss_val.item() * bsz_val
+                            val_samples += bsz_val
+
+                            # 若有 LM Head，则做 top-k 的简单评估
+                            if head is not None:
+                                pred_logits = head(pred_gt)
+                                gt_logits = head(x_gt_val)
+
+                                pred_top3_tokens = torch.topk(pred_logits, k=3, dim=-1).indices
+                                gt_top3_tokens = torch.topk(gt_logits, k=3, dim=-1).indices
+                                pred_top1_tokens = pred_top3_tokens[:, 0]
+                                gt_top1_tokens = gt_top3_tokens[:, 0]
+                                gt_top2_tokens = gt_top3_tokens[:, :2]
+
+                                for i in range(bsz_val):
+                                    if pred_top1_tokens[i] == gt_top1_tokens[i]:
+                                        top1_in_top1_sum += 1
+                                    if pred_top1_tokens[i] in gt_top2_tokens[i]:
+                                        top1_in_top2_sum += 1
+                                    if pred_top1_tokens[i] in gt_top3_tokens[i]:
+                                        top1_in_top3_sum += 1
+
+                    # 计算验证指标
+                    if val_samples > 0:
+                        avg_val_loss = val_loss / val_samples
+                        top1_in_top1_prob = top1_in_top1_sum / val_samples
+                        top1_in_top2_prob = top1_in_top2_sum / val_samples
+                        top1_in_top3_prob = top1_in_top3_sum / val_samples
+                    else:
+                        avg_val_loss = 0.0
+                        top1_in_top1_prob = 0.0
+                        top1_in_top2_prob = 0.0
+                        top1_in_top3_prob = 0.0
+
+                    logger.info(f"[Global Step {global_step}] Val Loss: {avg_val_loss:.4f}")
+                    logger.info(f"[Global Step {global_step}] Top-1 in Top-1: {top1_in_top1_prob:.4f}")
+                    logger.info(f"[Global Step {global_step}] Top-1 in Top-2: {top1_in_top2_prob:.4f}")
+                    logger.info(f"[Global Step {global_step}] Top-1 in Top-3: {top1_in_top3_prob:.4f}")
+
+                    if accelerator.is_main_process:
+                        wandb.log({
+                            "val_loss": avg_val_loss,
+                            "top1_in_top1_accuracy": top1_in_top1_prob,
+                            "top1_in_top2_accuracy": top1_in_top2_prob,
+                            "top1_in_top3_accuracy": top1_in_top3_prob,
+                            "global_step": global_step
+                        })
+
+                    # 保存当前checkpoint
+                    # 仅主进程保存模型；可根据需求保存在不同目录
+                    if accelerator.is_main_process:
+                        ckpt_path = os.path.join(args.output_dir, f"pytorch_model_step{global_step}.bin")
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        torch.save(unwrapped_model.state_dict(), ckpt_path)
+                        logger.info(f"Checkpoint saved at step {global_step} -> {ckpt_path}")
+
+                    model.train()  # 验证后切回 train 模式
+
+            # 如果达到max_train_steps，就停止
             if global_step >= args.max_train_steps:
                 break
 
-        logger.info(f"Epoch {epoch + 1} finished.")
+        logger.info("Training loop complete.")
 
-        # ========== 验证 / 推理 ==========
-        model.eval()
-        val_loss = 0.0
-        val_samples = 0
-        top1_in_top1_sum = 0.0
-        top1_in_top2_sum = 0.0
-        top1_in_top3_sum = 0.0
-
-        with torch.no_grad():
-            for batch in tqdm(val_dataloader):
-                x_draft_val = batch["draft"]
-                x_gt_val = batch["gt"]
-                bsz_val = x_draft_val.size(0)
-
-                # 推理
-                pred_gt = inference_pipeline(
-                    draft_hidden=x_draft_val,
-                    noise_scheduler=noise_scheduler,
-                    model=model,
-                    device=x_draft_val.device,
-                    num_inference_steps=num_train_timesteps,
-                )
-                loss_val = F.mse_loss(pred_gt, x_gt_val)
-                val_loss += loss_val.item() * bsz_val
-                val_samples += bsz_val
-
-                # 若有 LM Head，则做一些 top-k 准确率评估
-                if head is not None:
-                    pred_logits = head(pred_gt)
-                    gt_logits = head(x_gt_val)
-
-                    pred_top3_tokens = torch.topk(pred_logits, k=3, dim=-1).indices
-                    gt_top3_tokens = torch.topk(gt_logits, k=3, dim=-1).indices
-                    pred_top1_tokens = pred_top3_tokens[:, 0]
-                    gt_top1_tokens = gt_top3_tokens[:, 0]
-                    gt_top2_tokens = gt_top3_tokens[:, :2]
-
-                    for i in range(bsz_val):
-                        if pred_top1_tokens[i] == gt_top1_tokens[i]:
-                            top1_in_top1_sum += 1
-                        if pred_top1_tokens[i] in gt_top2_tokens[i]:
-                            top1_in_top2_sum += 1
-                        if pred_top1_tokens[i] in gt_top3_tokens[i]:
-                            top1_in_top3_sum += 1
-
-        avg_val_loss = val_loss / val_samples if val_samples > 0 else 0.0
-        logger.info(f"Validation loss: {avg_val_loss:.4f}")
-
-        top1_in_top1_prob = top1_in_top1_sum / val_samples if val_samples > 0 else 0.0
-        top1_in_top2_prob = top1_in_top2_sum / val_samples if val_samples > 0 else 0.0
-        top1_in_top3_prob = top1_in_top3_sum / val_samples if val_samples > 0 else 0.0
-
-        logger.info(f"Top-1 in Top-1 Accuracy: {top1_in_top1_prob:.4f}")
-        logger.info(f"Top-1 in Top-2 Accuracy: {top1_in_top2_prob:.4f}")
-        logger.info(f"Top-1 in Top-3 Accuracy: {top1_in_top3_prob:.4f}")
-
+        # 训练结束后，可选地再做一次验证或保存最终模型（根据需要）
         if accelerator.is_main_process:
-            wandb.log({
-                "val_loss": avg_val_loss,
-                "epoch": epoch + 1,
-                "global_step": global_step,
-                "top1_in_top1_accuracy": top1_in_top1_prob,
-                "top1_in_top2_accuracy": top1_in_top2_prob,
-                "top1_in_top3_accuracy": top1_in_top3_prob
-            })
+            final_path = os.path.join(args.output_dir, "pytorch_model_final.bin")
+            torch.save(accelerator.unwrap_model(model).state_dict(), final_path)
+            logger.info(f"Final model saved to {final_path}")
 
-        if global_step >= args.max_train_steps:
-            break
-
-    # ========== 保存模型 ==========
-    if accelerator.is_main_process:
-        final_model = accelerator.unwrap_model(model)
-        torch.save(final_model.state_dict(), os.path.join(args.output_dir, "pytorch_model.bin"))
-        logger.info(f"Model saved to {args.output_dir}")
-
-        wandb.finish()
 
     logger.info("Training & Inference finished.")
 
