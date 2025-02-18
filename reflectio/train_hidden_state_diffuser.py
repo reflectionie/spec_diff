@@ -75,8 +75,9 @@ class ChainedHiddenStateBatchDataset(Dataset):
         def get_file_length(p):
             # 只加载CPU版本，减少内存占用
             data = torch.load(p, map_location="cpu")
+            draft = data["draft_hidden"].squeeze(0)  # [seq_len, hidden_dim]
             # 假设 draft_hidden 与 hidden_state 的长度相同
-            return data["draft_hidden"].shape[0]
+            return draft.shape[0]
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             file_lengths = list(tqdm(executor.map(get_file_length, self.paths), total=len(self.paths)))
@@ -122,6 +123,10 @@ class ChainedHiddenStateBatchDataset(Dataset):
             loaded = torch.load(self.paths[file_idx])
             draft_data = loaded["draft_hidden"]
             gt_data = loaded["hidden_state"]
+
+            # 如果 draft_data 的形状是 [1, seq_len, hidden_dim]，只要把第0维 squeeze 掉
+            draft_data = draft_data.squeeze(0)  # 现在变成 [seq_len, hidden_dim]
+            gt_data = gt_data.squeeze(0)   
 
             draft_chunks.append(draft_data[local_start: local_start + take])
             gt_chunks.append(gt_data[local_start: local_start + take])
@@ -275,7 +280,7 @@ def main():
     model = HiddenStateDiffusionModel(hidden_dim=args.hidden_dim, time_embed_dim=args.time_embed_dim)
 
     # 参数数量
-    total_params = sum(p.numel() for p in model.gtiparameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total training parameters: {total_params/1e9:.4f}B")
 
     model.train()
