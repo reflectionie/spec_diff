@@ -35,7 +35,6 @@ dependencies:
     - charset-normalizer==3.4.1
     - click==8.1.8
     - datasets==3.3.0
-    - diffusers==0.33.0.dev0
     - dill==0.3.8
     - docker-pycreds==0.4.0
     - eval-type-backport==0.2.2

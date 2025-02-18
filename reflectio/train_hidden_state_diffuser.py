@@ -67,7 +67,8 @@ class ChainedHiddenStateBatchDataset(Dataset):
         self.file_lengths = []
         self.cumulative_lengths = []
         cumulative = 0
-        for p in self.paths:
+        print("count data total_length...")
+        for p in tqdm(self.paths):
             data = torch.load(p)
             # 假设 draft_hidden 与 hidden_state 的长度相同
             length = data["draft_hidden"].shape[0]
