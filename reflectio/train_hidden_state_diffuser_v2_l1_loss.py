@@ -1,10 +1,15 @@
-#!/usr/bin/env python
+#!/usr/bin/env python 
 # coding=utf-8
 """ 
 python train_hidden_state_diffuser_v2.py \
   --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
-  --checkpointing_steps 100 --learning_rate 1e-6 --train_batch_size 32768
+  --checkpointing_steps 100  --train_batch_size 32768
+
+python train_hidden_state_diffuser_v2_l1_loss.py \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --checkpointing_steps 100  --train_batch_size 32768
 """
 
 import argparse
@@ -264,16 +269,13 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
     logger.info(f"[Draft] Top1 in Top2 Accuracy: {top1_in_top2:.4f}")
     logger.info(f"[Draft] Top1 in Top3 Accuracy: {top1_in_top3:.4f}")
 
-    # 如果想让“draft阶段”的指标作为 top1_in_top1_accuracy 等曲线的起点
     if accelerator.is_main_process:
-        # 注意这里直接用和后续验证相同的名字，并且指定 step=0
         wandb.log({
-            "val_loss": avg_mse,                    # 可以改成别的名字或干脆不记录
+            "val_L1_loss": avg_mse,  # 这里保留原指标名称，可根据需要更改
             "top1_in_top1_accuracy": top1_in_top1,
             "top1_in_top2_accuracy": top1_in_top2,
             "top1_in_top3_accuracy": top1_in_top3
         }, step=0)
-
 
 
 ###############################################################################
@@ -363,11 +365,7 @@ def main():
     num_train_timesteps = 1000
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=num_train_timesteps,
-        # beta_start=0.0001,  # default
-        # beta_end=0.02,
-        # beta_start=1e-4,    # for origin data
-        # beta_end=3.7e-3,
-        beta_start=1e-4,    # for v2_std
+        beta_start=1e-4,
         beta_end=1.9e-3,
         beta_schedule="linear",
         prediction_type="sample"
@@ -448,23 +446,22 @@ def main():
                 noise = torch.randn_like(x_gt)
                 x_noisy = noise_scheduler.add_noise(x_gt, noise, timesteps)
 
-                # 2) 前向 & 损失
+                # 2) 前向 & 损失 (使用 L1 损失)
                 output = model(sample=x_noisy, timestep=timesteps, draft=x_draft, return_dict=True)
                 predicted_gt = output.sample
-                loss = F.mse_loss(predicted_gt, x_gt.to(predicted_gt.dtype))
+                loss = F.l1_loss(predicted_gt, x_gt.to(predicted_gt.dtype))
 
                 # 3) 反向 & 优化
                 accelerator.backward(loss)
                 optimizer.step()
                 optimizer.zero_grad()
 
-            # 只有在同步梯度时才更新进度与 global_step
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    wandb.log({"train_loss": loss.item(), "global_step": global_step})
+                    wandb.log({"train_L1_loss": loss.item(), "global_step": global_step})
 
                 # ========== 周期性验证与保存 ========== 
                 if global_step % args.checkpointing_steps == 0:
@@ -491,12 +488,11 @@ def main():
                                 num_inference_steps=num_train_timesteps,
                             )
 
-                            # 计算 MSE
-                            loss_val = F.mse_loss(pred_gt, x_gt_val)
+                            # 计算 L1 损失
+                            loss_val = F.l1_loss(pred_gt, x_gt_val)
                             val_loss += loss_val.item() * bsz_val
                             val_samples += bsz_val
 
-                            # 如果有 LM Head，就做 top-k 评估
                             if head is not None:
                                 pred_logits = head(pred_gt)
                                 gt_logits   = head(x_gt_val)
@@ -506,7 +502,7 @@ def main():
 
                                 pred_top1_tokens = pred_top3_tokens[:, 0]
                                 gt_top1_tokens   = gt_top3_tokens[:, 0]
-                                gt_top2_tokens   = gt_top3_tokens[:, :2]  # [bsz, 2]
+                                gt_top2_tokens   = gt_top3_tokens[:, :2]
 
                                 for i in range(bsz_val):
                                     if pred_top1_tokens[i] == gt_top1_tokens[i]:
@@ -516,7 +512,6 @@ def main():
                                     if pred_top1_tokens[i] in gt_top3_tokens[i]:
                                         top1_in_top3_sum += 1
 
-                    # 计算验证集上总的指标
                     if val_samples > 0:
                         avg_val_loss = val_loss / val_samples
                         top1_in_top1_prob = top1_in_top1_sum / val_samples
@@ -528,21 +523,20 @@ def main():
                         top1_in_top2_prob = 0.0
                         top1_in_top3_prob = 0.0
 
-                    logger.info(f"[Global Step {global_step}] Val Loss: {avg_val_loss:.4f}")
+                    logger.info(f"[Global Step {global_step}] Val L1 Loss: {avg_val_loss:.4f}")
                     logger.info(f"[Global Step {global_step}] Top1 in Top1: {top1_in_top1_prob:.4f}")
                     logger.info(f"[Global Step {global_step}] Top1 in Top2: {top1_in_top2_prob:.4f}")
                     logger.info(f"[Global Step {global_step}] Top1 in Top3: {top1_in_top3_prob:.4f}")
 
                     if accelerator.is_main_process:
                         wandb.log({
-                            "val_loss": avg_val_loss,
+                            "val_L1_loss": avg_val_loss,
                             "top1_in_top1_accuracy": top1_in_top1_prob,
                             "top1_in_top2_accuracy": top1_in_top2_prob,
                             "top1_in_top3_accuracy": top1_in_top3_prob,
                             "global_step": global_step
                         })
 
-                        # 保存checkpoint
                         ckpt_path = os.path.join(project_dir, f"pytorch_model_step{global_step}.bin")
                         unwrapped_model = accelerator.unwrap_model(model)
                         torch.save(unwrapped_model.state_dict(), ckpt_path)
@@ -550,7 +544,6 @@ def main():
 
                     model.train()
 
-            # 提前退出
             if global_step >= args.max_train_steps:
                 break
 
@@ -559,7 +552,6 @@ def main():
 
     logger.info("Training loop complete.")
 
-    # 可选：保存最终模型
     if accelerator.is_main_process:
         final_path = os.path.join(project_dir, "pytorch_model_final.bin")
         torch.save(accelerator.unwrap_model(model).state_dict(), final_path)
