@@ -32,7 +32,7 @@ from diffusers import DDPMScheduler
 from concurrent.futures import ThreadPoolExecutor
 
 # 导入我们定义的条件扩散模型
-from my_hidden_state_diffusion import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+from my_hidden_state_diffusion_v2 import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -363,8 +363,10 @@ def main():
     num_train_timesteps = 1000
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=num_train_timesteps,
-        beta_start=0.0001,
-        beta_end=0.02,
+        # beta_start=0.0001,
+        # beta_end=0.02,
+        beta_start=1e-4,
+        beta_end=3.7e-3,
         beta_schedule="linear",
         prediction_type="sample"
     )

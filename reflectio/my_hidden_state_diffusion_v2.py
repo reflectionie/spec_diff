@@ -53,7 +53,7 @@ class HiddenStateDiffusionModel(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(
         self,
-        hidden_dim: int = 128,        # sample 和 draft 的原始维度
+        hidden_dim: int = 4096,        # sample 和 draft 的原始维度
         time_embed_dim: int = 64,     # 时间步嵌入维度
         num_layers: int = 4,         # 残差层数，可根据需要增减
     ):
