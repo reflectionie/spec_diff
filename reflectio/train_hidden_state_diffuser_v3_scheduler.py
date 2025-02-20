@@ -25,6 +25,18 @@ python train_hidden_state_diffuser_v3_scheduler.py \
   --beta_start 0.0001 \
   --beta_end 0.1
 
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --model_module my_hidden_state_diffusion_v2 \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_start 1e-4 --beta_end 1.9e-3 --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 1e-5 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.1
+
 """
 
 import argparse
@@ -274,7 +286,7 @@ def parse_args():
     parser.add_argument("--train_batch_size", type=int, default=8192)
     parser.add_argument("--hidden_dim", type=int, default=4096, help="draft 和 gt 的隐藏向量维度")
     parser.add_argument("--time_embed_dim", type=int, default=64, help="时间步嵌入的维度")
-    parser.add_argument("--num_train_epochs", type=int, default=10)
+    parser.add_argument("--num_train_epochs", type=int, default=3)
     parser.add_argument("--max_train_steps", type=int, default=None)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
