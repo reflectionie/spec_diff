@@ -37,7 +37,7 @@ from diffusers import DDPMScheduler
 from concurrent.futures import ThreadPoolExecutor
 
 # 导入我们定义的条件扩散模型
-from my_hidden_state_diffusion_v2_std import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+from my_hidden_state_diffusion import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -218,7 +218,7 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
     top1_in_top3_sum = 0.0
 
     total_samples = 0
-    total_mse = 0.0
+    total_mae = 0.0
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluate Draft", ncols=80):
@@ -231,9 +231,9 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
             # 2) gt -> LM Head
             gt_logits = head(gt)
 
-            # 额外可选：draft vs gt 的 MSE
-            mse = F.mse_loss(draft, gt).item()
-            total_mse += mse * bsz
+            # 额外可选：draft vs gt 的 mae
+            mae = F.l1_loss(draft, gt).item()
+            total_mae += mae * bsz
 
             # 3) 计算 top-k
             pred_top3_tokens = torch.topk(pred_logits, k=3, dim=-1).indices  # [bsz, 3]
@@ -254,24 +254,24 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
             total_samples += bsz
 
     if total_samples == 0:
-        avg_mse = 0.0
+        avg_mae = 0.0
         top1_in_top1 = 0.0
         top1_in_top2 = 0.0
         top1_in_top3 = 0.0
     else:
-        avg_mse = total_mse / total_samples
+        avg_mae = total_mae / total_samples
         top1_in_top1 = top1_in_top1_sum / total_samples
         top1_in_top2 = top1_in_top2_sum / total_samples
         top1_in_top3 = top1_in_top3_sum / total_samples
 
-    logger.info(f"[Draft] MSE(draft, gt): {avg_mse:.4f}")
+    logger.info(f"[Draft] mae(draft, gt): {avg_mae:.4f}")
     logger.info(f"[Draft] Top1 in Top1 Accuracy: {top1_in_top1:.4f}")
     logger.info(f"[Draft] Top1 in Top2 Accuracy: {top1_in_top2:.4f}")
     logger.info(f"[Draft] Top1 in Top3 Accuracy: {top1_in_top3:.4f}")
 
     if accelerator.is_main_process:
         wandb.log({
-            "val_L1_loss": avg_mse,  # 这里保留原指标名称，可根据需要更改
+            "val_L1_loss": avg_mae,  # 这里保留原指标名称，可根据需要更改
             "top1_in_top1_accuracy": top1_in_top1,
             "top1_in_top2_accuracy": top1_in_top2,
             "top1_in_top3_accuracy": top1_in_top3
@@ -365,7 +365,11 @@ def main():
     num_train_timesteps = 1000
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=num_train_timesteps,
-        beta_start=1e-4,
+        # beta_start=0.0001,  # default
+        # beta_end=0.02,
+        # beta_start=1e-4,    # for origin data
+        # beta_end=3.7e-3,
+        beta_start=1e-4,    # for v2_std
         beta_end=1.9e-3,
         beta_schedule="linear",
         prediction_type="sample"

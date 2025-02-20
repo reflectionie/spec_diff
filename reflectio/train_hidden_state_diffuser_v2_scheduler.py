@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # coding=utf-8
 """ 
-python train_hidden_state_diffuser_v2.py \
+python train_hidden_state_diffuser_v2_scheduler.py \
   --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
-  --checkpointing_steps 100 --learning_rate 1e-6 --train_batch_size 32768
+  --checkpointing_steps 100 --learning_rate 1e-6 --train_batch_size 32768 --warmup_steps 1000
+
+ python train_hidden_state_diffuser_v2_scheduler.py   --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data   --checkpointing_steps 100  --train_batch_size 32768 --warmup_steps 1000
 """
 
 import argparse
@@ -15,6 +17,8 @@ from pathlib import Path
 import json
 from safetensors import safe_open
 from transformers import AutoConfig
+##### 新增导入：学习率调度器
+from transformers import get_linear_schedule_with_warmup
 
 import torch
 import torch.nn.functional as F
@@ -32,7 +36,9 @@ from diffusers import DDPMScheduler
 from concurrent.futures import ThreadPoolExecutor
 
 # 导入我们定义的条件扩散模型
-from my_hidden_state_diffusion_v2 import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+# from my_hidden_state_diffusion import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+# from my_hidden_state_diffusion_v2 import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+from my_hidden_state_diffusion_v1_concat import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -44,22 +50,9 @@ class ChainedHiddenStateBatchDataset(Dataset):
     """
     该数据集将多个文件中的 hidden state 按顺序拼接成一个长序列，
     然后每次返回一个连续片段，该片段的长度等于 batch_size（即 chunk_size）。
-
-    假设每个文件的内容格式为：
-        {
-           "draft_hidden": tensor of shape [seq_len, hidden_dim],
-           "hidden_state": tensor of shape [seq_len, hidden_dim]
-        }
-    那么我们会将所有文件的草稿 hidden_state (draft) 和真实 hidden_state (gt)
-    各自拼接成一个按顺序的长序列。
     """
 
     def __init__(self, paths, chunk_size, num_workers=40):
-        """
-        :param paths: 文件路径列表，每个文件包含 {"draft_hidden", "hidden_state"} 两个键
-        :param chunk_size: 训练时每个 batch 需要的连续长度
-        :param num_workers: 多线程加载文件时使用的线程数
-        """
         super().__init__()
         self.paths = paths
         self.chunk_size = chunk_size
@@ -92,11 +85,6 @@ class ChainedHiddenStateBatchDataset(Dataset):
         return self.num_batches
 
     def __getitem__(self, index):
-        """
-        返回一个训练 batch，包含连续的 chunk_size 个 hidden state（分别来自 draft 和 gt）。
-        draft: [chunk_size, hidden_dim]
-        gt: [chunk_size, hidden_dim]
-        """
         start = index * self.chunk_size
         end = start + self.chunk_size
 
@@ -131,10 +119,6 @@ class ChainedHiddenStateBatchDataset(Dataset):
         return {"draft": draft_batch, "gt": gt_batch}
 
     def _find_file_index(self, global_index):
-        """
-        二分查找：根据全局索引找到该 hidden state 属于哪个文件
-        返回文件的索引
-        """
         low, high = 0, len(self.cumulative_lengths) - 1
         while low <= high:
             mid = (low + high) // 2
@@ -146,14 +130,6 @@ class ChainedHiddenStateBatchDataset(Dataset):
 
 
 def collate_draft_gt(batch):
-    """
-    将一个batch (List[{"draft": tensor, "gt": tensor}]) 拼接。
-    返回:
-    {
-        "draft": [B * chunk_size, hidden_dim],
-        "gt": [B * chunk_size, hidden_dim]
-    }
-    """
     drafts = [b["draft"] for b in batch]
     gts = [b["gt"] for b in batch]
     return {
@@ -166,9 +142,6 @@ def collate_draft_gt(batch):
 # 推理（采样）函数
 ###############################################################################
 def inference_pipeline(draft_hidden, noise_scheduler, model, device, num_inference_steps=None):
-    """
-    给定 draft_hidden 作为条件，从纯噪声开始，通过反向扩散生成预测的 gt_hidden。
-    """
     if num_inference_steps is None:
         num_inference_steps = noise_scheduler.config.num_train_timesteps
 
@@ -186,7 +159,7 @@ def inference_pipeline(draft_hidden, noise_scheduler, model, device, num_inferen
 
 
 ###############################################################################
-# 工具函数：列出某个文件夹下的所有文件
+# 列出某个文件夹下的所有文件
 ###############################################################################
 def list_files(path):
     datapath = []
@@ -201,9 +174,6 @@ def list_files(path):
 # 评估草稿 (draft) 的初始 top-k 准确率
 ###############################################################################
 def evaluate_draft_before_training(dataloader, head, accelerator):
-    """
-    在还没开始训练前，用 draft 直接过一次 head，看它的 top1_in_top1, top1_in_top2, top1_in_top3 等指标。
-    """
     logger.info("Start evaluating draft before training ...")
     device = accelerator.device
     head.eval()
@@ -217,26 +187,26 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluate Draft", ncols=80):
-            draft = batch["draft"].to(device)  # [batch_size, hidden_dim]
-            gt    = batch["gt"].to(device)     # [batch_size, hidden_dim]
+            draft = batch["draft"].to(device)
+            gt    = batch["gt"].to(device)
             bsz   = draft.size(0)
 
-            # 1) draft -> LM Head
+            # draft -> LM Head
             pred_logits = head(draft)
-            # 2) gt -> LM Head
+            # gt -> LM Head
             gt_logits = head(gt)
 
-            # 额外可选：draft vs gt 的 MSE
+            # draft vs gt 的 MSE
             mse = F.mse_loss(draft, gt).item()
             total_mse += mse * bsz
 
-            # 3) 计算 top-k
-            pred_top3_tokens = torch.topk(pred_logits, k=3, dim=-1).indices  # [bsz, 3]
-            gt_top3_tokens   = torch.topk(gt_logits, k=3, dim=-1).indices    # [bsz, 3]
+            # 计算 top-k
+            pred_top3_tokens = torch.topk(pred_logits, k=3, dim=-1).indices
+            gt_top3_tokens   = torch.topk(gt_logits, k=3, dim=-1).indices
 
-            pred_top1_tokens = pred_top3_tokens[:, 0]  # [bsz]
+            pred_top1_tokens = pred_top3_tokens[:, 0]
             gt_top1_tokens   = gt_top3_tokens[:, 0]
-            gt_top2_tokens   = gt_top3_tokens[:, :2]   # [bsz, 2]
+            gt_top2_tokens   = gt_top3_tokens[:, :2]
 
             for i in range(bsz):
                 if pred_top1_tokens[i] == gt_top1_tokens[i]:
@@ -264,11 +234,9 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
     logger.info(f"[Draft] Top1 in Top2 Accuracy: {top1_in_top2:.4f}")
     logger.info(f"[Draft] Top1 in Top3 Accuracy: {top1_in_top3:.4f}")
 
-    # 如果想让“draft阶段”的指标作为 top1_in_top1_accuracy 等曲线的起点
     if accelerator.is_main_process:
-        # 注意这里直接用和后续验证相同的名字，并且指定 step=0
         wandb.log({
-            "val_loss": avg_mse,                    # 可以改成别的名字或干脆不记录
+            "val_loss": avg_mse,
             "top1_in_top1_accuracy": top1_in_top1,
             "top1_in_top2_accuracy": top1_in_top2,
             "top1_in_top3_accuracy": top1_in_top3
@@ -288,10 +256,12 @@ def parse_args():
     parser.add_argument("--train_batch_size", type=int, default=8192)
     parser.add_argument("--hidden_dim", type=int, default=4096, help="draft 和 gt 的隐藏向量维度")
     parser.add_argument("--time_embed_dim", type=int, default=64, help="时间步嵌入的维度")
-    parser.add_argument("--num_train_epochs", type=int, default=3)
+    parser.add_argument("--num_train_epochs", type=int, default=10)
     parser.add_argument("--max_train_steps", type=int, default=None)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
+    ##### 新增参数：warmup_steps（可改成 warmup_ratio 视需要）
+    parser.add_argument("--warmup_steps", type=int, default=0)
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--checkpointing_steps", type=int, default=500)
@@ -363,11 +333,7 @@ def main():
     num_train_timesteps = 1000
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=num_train_timesteps,
-        # beta_start=0.0001,  # default
-        # beta_end=0.02,
-        # beta_start=1e-4,    # for origin data
-        # beta_end=3.7e-3,
-        beta_start=1e-4,    # for v2_std
+        beta_start=1e-4,
         beta_end=1.9e-3,
         beta_schedule="linear",
         prediction_type="sample"
@@ -376,7 +342,7 @@ def main():
     # 优化器
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
 
-    # Accelerate 包装
+    # ========== 先不定义 scheduler，先准备好基础组件 ==========
     model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
         model, optimizer, train_dataloader, val_dataloader
     )
@@ -387,6 +353,16 @@ def main():
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     else:
         args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+
+    ##### 新增：定义学习率调度器（以 linear warmup+decay 为例）
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=args.warmup_steps,       # 线性预热 steps（可按需求改）
+        num_training_steps=args.max_train_steps   # 训练总步数
+    )
+
+    ##### 新增：将 scheduler 也交给 Accelerator 来 prepare
+    scheduler = accelerator.prepare(scheduler)
 
     if accelerator.is_main_process:
         os.makedirs(project_dir, exist_ok=True)
@@ -456,6 +432,9 @@ def main():
                 # 3) 反向 & 优化
                 accelerator.backward(loss)
                 optimizer.step()
+                ##### 新增：每次同步梯度后再对 scheduler 进行 step
+                if accelerator.sync_gradients:
+                    scheduler.step()
                 optimizer.zero_grad()
 
             # 只有在同步梯度时才更新进度与 global_step
@@ -482,7 +461,6 @@ def main():
                             x_gt_val = val_batch["gt"]
                             bsz_val = x_draft_val.size(0)
 
-                            # 扩散推理
                             pred_gt = inference_pipeline(
                                 draft_hidden=x_draft_val,
                                 noise_scheduler=noise_scheduler,
@@ -491,12 +469,10 @@ def main():
                                 num_inference_steps=num_train_timesteps,
                             )
 
-                            # 计算 MSE
                             loss_val = F.mse_loss(pred_gt, x_gt_val)
                             val_loss += loss_val.item() * bsz_val
                             val_samples += bsz_val
 
-                            # 如果有 LM Head，就做 top-k 评估
                             if head is not None:
                                 pred_logits = head(pred_gt)
                                 gt_logits   = head(x_gt_val)
@@ -506,7 +482,7 @@ def main():
 
                                 pred_top1_tokens = pred_top3_tokens[:, 0]
                                 gt_top1_tokens   = gt_top3_tokens[:, 0]
-                                gt_top2_tokens   = gt_top3_tokens[:, :2]  # [bsz, 2]
+                                gt_top2_tokens   = gt_top3_tokens[:, :2]
 
                                 for i in range(bsz_val):
                                     if pred_top1_tokens[i] == gt_top1_tokens[i]:
@@ -539,14 +515,16 @@ def main():
                             "top1_in_top1_accuracy": top1_in_top1_prob,
                             "top1_in_top2_accuracy": top1_in_top2_prob,
                             "top1_in_top3_accuracy": top1_in_top3_prob,
-                            "global_step": global_step
+                            "global_step": global_step,
+                            ##### 记录学习率
+                            "learning_rate": scheduler.get_last_lr()[0]
                         })
 
                         # 保存checkpoint
-                        ckpt_path = os.path.join(project_dir, f"pytorch_model_step{global_step}.bin")
-                        unwrapped_model = accelerator.unwrap_model(model)
-                        torch.save(unwrapped_model.state_dict(), ckpt_path)
-                        logger.info(f"Checkpoint saved at step {global_step} -> {ckpt_path}")
+                        # ckpt_path = os.path.join(project_dir, f"pytorch_model_step{global_step}.bin")
+                        # unwrapped_model = accelerator.unwrap_model(model)
+                        # torch.save(unwrapped_model.state_dict(), ckpt_path)
+                        # logger.info(f"Checkpoint saved at step {global_step} -> {ckpt_path}")
 
                     model.train()
 
