@@ -1,12 +1,58 @@
 #!/usr/bin/env python
 # coding=utf-8
 """ 
-python train_hidden_state_diffuser_v2_scheduler.py \
-  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --model_module my_hidden_state_diffusion_v2 \
   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
-  --checkpointing_steps 100 --learning_rate 1e-6 --train_batch_size 32768 --warmup_steps 1000
+  --beta_start 1e-4 --beta_end 1.9e-3 --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 1e-5
+  --time_embed_dim 128
 
- python train_hidden_state_diffuser_v2_scheduler.py   --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data   --checkpointing_steps 100  --train_batch_size 32768 --warmup_steps 1000
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --model_module my_hidden_state_diffusion_v2 \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_start 1e-4 --beta_end 1.9e-3 --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 2e-5
+  --time_embed_dim 64
+
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --model_module my_hidden_state_diffusion_v2 \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_start 1e-4 --beta_end 1.9e-3 --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 1e-5
+  --time_embed_dim 256
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --model_module my_hidden_state_diffusion_v2 \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_start 1e-4 --beta_end 1.9e-3 --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v3_concat \
+  --learning_rate 1e-5
+  --time_embed_dim 64
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --model_module my_hidden_state_diffusion_v2 \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_start 1e-4 --beta_end 1.9e-3 --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v4_concat \
+  --learning_rate 1e-5
+  --time_embed_dim 64
+
 """
 
 import argparse
@@ -17,7 +63,7 @@ from pathlib import Path
 import json
 from safetensors import safe_open
 from transformers import AutoConfig
-##### 新增导入：学习率调度器
+# 新增导入：学习率调度器
 from transformers import get_linear_schedule_with_warmup
 
 import torch
@@ -35,10 +81,10 @@ import wandb
 from diffusers import DDPMScheduler
 from concurrent.futures import ThreadPoolExecutor
 
-# 导入我们定义的条件扩散模型
-from my_hidden_state_diffusion import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
-from my_hidden_state_diffusion_v2 import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
-from my_hidden_state_diffusion_v1_concat import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+# 删除固定导入 HiddenStateDiffusionModel 的代码
+# from my_hidden_state_diffusion import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+# from my_hidden_state_diffusion_v2 import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
+# from my_hidden_state_diffusion_v1_concat import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -260,13 +306,20 @@ def parse_args():
     parser.add_argument("--max_train_steps", type=int, default=None)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
-    ##### 新增参数：warmup_steps（可改成 warmup_ratio 视需要）
+    # 新增参数：warmup_steps
     parser.add_argument("--warmup_steps", type=int, default=0)
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--checkpointing_steps", type=int, default=500)
     parser.add_argument("--basepath", type=str, default=None, 
                         help="预训练 LM Head 的路径（可选），若不指定则跳过 LM Head 的加载")
+    # 新增参数：模型模块导入参数（必须提供）
+    parser.add_argument("--model_module", type=str, required=True,
+                        help="指定导入 HiddenStateDiffusionModel 的 Python 模块，如 'my_hidden_state_diffusion_v2'")
+    # 新增参数：beta 参数配置
+    parser.add_argument("--beta_start", type=float, default=1e-4, help="DDPMScheduler的beta_start参数")
+    parser.add_argument("--beta_end", type=float, default=1.9e-3, help="DDPMScheduler的beta_end参数")
+    parser.add_argument("--beta_schedule", type=str, default="linear", help="DDPMScheduler的beta_schedule参数")
     return parser.parse_args()
 
 
@@ -275,6 +328,11 @@ def parse_args():
 ###############################################################################
 def main():
     args = parse_args()
+
+    # 动态导入指定模块中的 HiddenStateDiffusionModel
+    import importlib
+    model_module = importlib.import_module(args.model_module)
+    HiddenStateDiffusionModel = model_module.HiddenStateDiffusionModel
 
     from datetime import datetime
     run_name = datetime.now().strftime("%Y%m%d_%H%M")
@@ -333,9 +391,9 @@ def main():
     num_train_timesteps = 1000
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=num_train_timesteps,
-        beta_start=1e-4,
-        beta_end=1.9e-3,
-        beta_schedule="linear",
+        beta_start=args.beta_start,
+        beta_end=args.beta_end,
+        beta_schedule=args.beta_schedule,
         prediction_type="sample"
     )
 
@@ -354,20 +412,20 @@ def main():
     else:
         args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    ##### 新增：定义学习率调度器（以 linear warmup+decay 为例）
+    # 新增：定义学习率调度器（以 linear warmup+decay 为例）
     scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=args.warmup_steps,       # 线性预热 steps（可按需求改）
         num_training_steps=args.max_train_steps   # 训练总步数
     )
 
-    ##### 新增：将 scheduler 也交给 Accelerator 来 prepare
+    # 新增：将 scheduler 也交给 Accelerator 来 prepare
     scheduler = accelerator.prepare(scheduler)
 
     if accelerator.is_main_process:
         os.makedirs(project_dir, exist_ok=True)
 
-    # ========== 加载 LM Head（可选） =========
+    # ========== 加载 LM Head（可选） ==========
     head = None
     if args.basepath is not None:
         logger.info(f"Loading LM Head from: {args.basepath}")
@@ -400,13 +458,13 @@ def main():
     else:
         logger.info("LM Head evaluation disabled (no basepath provided).")
 
-    # ========== 在开始训练之前，先对 draft 做一次评估 ========== 
+    # ========== 在开始训练之前，先对 draft 做一次评估 ==========
     if head is not None:
         evaluate_draft_before_training(val_dataloader, head, accelerator)
     else:
         logger.info("Skip draft evaluation because head is None.")
 
-    # ========== 正式训练 ========== 
+    # ========== 正式训练 ==========
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process, ncols=80)
     progress_bar.set_description("Training")
 
@@ -432,7 +490,7 @@ def main():
                 # 3) 反向 & 优化
                 accelerator.backward(loss)
                 optimizer.step()
-                ##### 新增：每次同步梯度后再对 scheduler 进行 step
+                # 新增：每次同步梯度后再对 scheduler 进行 step
                 if accelerator.sync_gradients:
                     scheduler.step()
                 optimizer.zero_grad()
@@ -445,7 +503,7 @@ def main():
                 if accelerator.is_main_process:
                     wandb.log({"train_loss": loss.item(), "global_step": global_step})
 
-                # ========== 周期性验证与保存 ========== 
+                # ========== 周期性验证与保存 ==========
                 if global_step % args.checkpointing_steps == 0:
                     model.eval()
                     val_loss = 0.0
@@ -516,15 +574,9 @@ def main():
                             "top1_in_top2_accuracy": top1_in_top2_prob,
                             "top1_in_top3_accuracy": top1_in_top3_prob,
                             "global_step": global_step,
-                            ##### 记录学习率
+                            # 记录学习率
                             "learning_rate": scheduler.get_last_lr()[0]
                         })
-
-                        # 保存checkpoint
-                        # ckpt_path = os.path.join(project_dir, f"pytorch_model_step{global_step}.bin")
-                        # unwrapped_model = accelerator.unwrap_model(model)
-                        # torch.save(unwrapped_model.state_dict(), ckpt_path)
-                        # logger.info(f"Checkpoint saved at step {global_step} -> {ckpt_path}")
 
                     model.train()
 
