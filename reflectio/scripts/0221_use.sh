@@ -297,3 +297,108 @@ python train_hidden_state_diffuser_v4_scheduler.py \
   --beta_end 0.01 \
   --num_train_epochs 3 \
   --lm_loss_weight 0.5
+
+
+# ####################### batch size 2
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 4096 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 1.25e-6 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 2048 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 6.25e-7 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
+
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 1024 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 3.125e-7 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 512 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat \
+  --learning_rate 1.5625e-7 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
+
+
+
+  # ##############batch_size 2 + predict gt
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 4096 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat_direct \
+  --learning_rate 1.25e-6 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 2048 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat_direct \
+  --learning_rate 6.25e-7 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
+
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 1024 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat_direct \
+  --learning_rate 3.125e-7 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
+
+python train_hidden_state_diffuser_v3_scheduler.py \
+  --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
+  --beta_schedule linear \
+  --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
+  --checkpointing_steps 2000 --train_batch_size 512 --warmup_steps 1000 \
+  --model_module my_hidden_state_diffusion_v1_concat_direct \
+  --learning_rate 1.5625e-7 \
+  --time_embed_dim 64 \
+  --beta_start 0.0001 \
+  --beta_end 0.01 \
+  --num_train_epochs 3
