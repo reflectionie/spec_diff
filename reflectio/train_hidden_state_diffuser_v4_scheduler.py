@@ -27,11 +27,6 @@ import wandb
 from diffusers import DDPMScheduler
 from concurrent.futures import ThreadPoolExecutor
 
-# 删除固定导入 HiddenStateDiffusionModel 的代码
-# from my_hidden_state_diffusion import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
-# from my_hidden_state_diffusion_v2 import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
-# from my_hidden_state_diffusion_v1_concat import HiddenStateDiffusionModel, HiddenStateDiffusionOutput
-
 logger = get_logger(__name__, log_level="INFO")
 
 
@@ -163,9 +158,9 @@ def list_files(path):
 
 
 ###############################################################################
-# 评估草稿 (draft) 的初始 top-k 准确率
+# 评估草稿 (draft) 的初始 top-k 准确率及损失指标
 ###############################################################################
-def evaluate_draft_before_training(dataloader, head, accelerator):
+def evaluate_draft_before_training(dataloader, head, accelerator, lm_loss_weight):
     logger.info("Start evaluating draft before training ...")
     device = accelerator.device
     head.eval()
@@ -176,6 +171,8 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
 
     total_samples = 0
     total_mse = 0.0
+    total_lm_loss = 0.0
+    total_total_loss = 0.0
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluate Draft", ncols=80):
@@ -183,16 +180,25 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
             gt    = batch["gt"].to(device)
             bsz   = draft.size(0)
 
-            # draft -> LM Head
-            pred_logits = head(draft)
-            # gt -> LM Head
-            gt_logits = head(gt)
-
-            # draft vs gt 的 MSE
+            # 计算 MSE
             mse = F.mse_loss(draft, gt).item()
             total_mse += mse * bsz
 
-            # 计算 top-k
+            # 计算 LM loss（对 draft 和 gt 的 LM head 输出计算交叉熵）
+            lm_loss_val = 0.0
+            if head is not None:
+                target_dist = F.softmax(head(gt), dim=-1)
+                pred_logits = head(draft)
+                pred_log_probs = F.log_softmax(pred_logits, dim=-1)
+                lm_loss_val = - (target_dist * pred_log_probs).sum(dim=-1).mean().item()
+            total_lm_loss += lm_loss_val * bsz
+
+            total_loss = mse + lm_loss_val * lm_loss_weight
+            total_total_loss += total_loss * bsz
+
+            # 计算 top-k 准确率（均基于 LM head 的输出）
+            pred_logits = head(draft)
+            gt_logits = head(gt)
             pred_top3_tokens = torch.topk(pred_logits, k=3, dim=-1).indices
             gt_top3_tokens   = torch.topk(gt_logits, k=3, dim=-1).indices
 
@@ -212,28 +218,38 @@ def evaluate_draft_before_training(dataloader, head, accelerator):
 
     if total_samples == 0:
         avg_mse = 0.0
+        avg_lm_loss = 0.0
+        avg_total_loss = 0.0
         top1_in_top1 = 0.0
         top1_in_top2 = 0.0
         top1_in_top3 = 0.0
     else:
         avg_mse = total_mse / total_samples
+        avg_lm_loss = total_lm_loss / total_samples
+        avg_total_loss = total_total_loss / total_samples
         top1_in_top1 = top1_in_top1_sum / total_samples
         top1_in_top2 = top1_in_top2_sum / total_samples
         top1_in_top3 = top1_in_top3_sum / total_samples
 
     logger.info(f"[Draft] MSE(draft, gt): {avg_mse:.4f}")
+    if head is not None:
+        logger.info(f"[Draft] LM Loss: {avg_lm_loss:.4f}")
+        logger.info(f"[Draft] Total Loss: {avg_total_loss:.4f}")
     logger.info(f"[Draft] Top1 in Top1 Accuracy: {top1_in_top1:.4f}")
     logger.info(f"[Draft] Top1 in Top2 Accuracy: {top1_in_top2:.4f}")
     logger.info(f"[Draft] Top1 in Top3 Accuracy: {top1_in_top3:.4f}")
 
     if accelerator.is_main_process:
-        wandb.log({
-            "val_loss": avg_mse,
+        log_data = {
+            "val_loss": avg_mse,  # 依然为 MSE
             "top1_in_top1_accuracy": top1_in_top1,
             "top1_in_top2_accuracy": top1_in_top2,
-            "top1_in_top3_accuracy": top1_in_top3
-        }, step=0)
-
+            "top1_in_top3_accuracy": top1_in_top3,
+        }
+        if head is not None:
+            log_data["val_lm_loss"] = avg_lm_loss
+            log_data["val_total_loss"] = avg_total_loss
+        wandb.log(log_data, step=0)
 
 
 ###############################################################################
@@ -259,6 +275,9 @@ def parse_args():
     parser.add_argument("--checkpointing_steps", type=int, default=500)
     parser.add_argument("--basepath", type=str, default=None, 
                         help="预训练 LM Head 的路径（可选），若不指定则跳过 LM Head 的加载")
+    # 新增参数：控制 LM head 交叉熵损失的权重，用于调节两个损失的比例
+    parser.add_argument("--lm_loss_weight", type=float, default=1.0, 
+                        help="LM head 交叉熵损失的权重，用于调节两个损失的比例")
     # 新增参数：模型模块导入参数（必须提供）
     parser.add_argument("--model_module", type=str, required=True,
                         help="指定导入 HiddenStateDiffusionModel 的 Python 模块，如 'my_hidden_state_diffusion_v2'")
@@ -406,7 +425,7 @@ def main():
 
     # ========== 在开始训练之前，先对 draft 做一次评估 ==========
     if head is not None:
-        evaluate_draft_before_training(val_dataloader, head, accelerator)
+        evaluate_draft_before_training(val_dataloader, head, accelerator, args.lm_loss_weight)
     else:
         logger.info("Skip draft evaluation because head is None.")
 
@@ -428,15 +447,25 @@ def main():
                 noise = torch.randn_like(x_gt)
                 x_noisy = noise_scheduler.add_noise(x_gt, noise, timesteps)
 
-                # 2) 前向 & 损失
+                # 2) 前向 & 损失计算
                 output = model(sample=x_noisy, timestep=timesteps, draft=x_draft, return_dict=True)
                 predicted_gt = output.sample
-                loss = F.mse_loss(predicted_gt, x_gt.to(predicted_gt.dtype))
+                mse_loss = F.mse_loss(predicted_gt, x_gt.to(predicted_gt.dtype))
+                
+                lm_loss = torch.tensor(0.0, device=x_gt.device)
+                if head is not None:
+                    with torch.no_grad():
+                        target_dist = F.softmax(head(x_gt), dim=-1)
+                    pred_logits = head(predicted_gt)
+                    pred_log_probs = F.log_softmax(pred_logits, dim=-1)
+                    lm_loss = - (target_dist * pred_log_probs).sum(dim=-1).mean()
+                    total_loss = mse_loss + args.lm_loss_weight * lm_loss
+                else:
+                    total_loss = mse_loss
 
                 # 3) 反向 & 优化
-                accelerator.backward(loss)
+                accelerator.backward(total_loss)
                 optimizer.step()
-                # 新增：每次同步梯度后再对 scheduler 进行 step
                 if accelerator.sync_gradients:
                     scheduler.step()
                 optimizer.zero_grad()
@@ -447,12 +476,21 @@ def main():
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    wandb.log({"train_loss": loss.item(), "global_step": global_step})
+                    log_data = {
+                        "train_loss": mse_loss.item(),  # 保持原有 MSE 损失记录
+                        "train_total_loss": total_loss.item(),
+                        "global_step": global_step
+                    }
+                    if head is not None:
+                        log_data["train_lm_loss"] = lm_loss.item()
+                    wandb.log(log_data)
 
                 # ========== 周期性验证与保存 ==========
                 if global_step % args.checkpointing_steps == 0:
                     model.eval()
-                    val_loss = 0.0
+                    val_mse_loss_sum = 0.0
+                    val_lm_loss_sum = 0.0
+                    val_total_loss_sum = 0.0
                     val_samples = 0
 
                     top1_in_top1_sum = 0.0
@@ -473,8 +511,18 @@ def main():
                                 num_inference_steps=num_train_timesteps,
                             )
 
-                            loss_val = F.mse_loss(pred_gt, x_gt_val)
-                            val_loss += loss_val.item() * bsz_val
+                            mse_loss_val = F.mse_loss(pred_gt, x_gt_val)
+                            current_total_loss = mse_loss_val
+                            if head is not None:
+                                with torch.no_grad():
+                                    target_dist_val = F.softmax(head(x_gt_val), dim=-1)
+                                pred_logits_val = head(pred_gt)
+                                pred_log_probs_val = F.log_softmax(pred_logits_val, dim=-1)
+                                lm_loss_val = - (target_dist_val * pred_log_probs_val).sum(dim=-1).mean()
+                                current_total_loss = mse_loss_val + args.lm_loss_weight * lm_loss_val
+                                val_lm_loss_sum += lm_loss_val.item() * bsz_val
+                            val_mse_loss_sum += mse_loss_val.item() * bsz_val
+                            val_total_loss_sum += current_total_loss.item() * bsz_val
                             val_samples += bsz_val
 
                             if head is not None:
@@ -496,37 +544,48 @@ def main():
                                     if pred_top1_tokens[i] in gt_top3_tokens[i]:
                                         top1_in_top3_sum += 1
 
-                    # 计算验证集上总的指标
                     if val_samples > 0:
-                        avg_val_loss = val_loss / val_samples
+                        avg_val_mse_loss = val_mse_loss_sum / val_samples
+                        avg_val_total_loss = val_total_loss_sum / val_samples
+                        if head is not None:
+                            avg_val_lm_loss = val_lm_loss_sum / val_samples
+                        else:
+                            avg_val_lm_loss = 0.0
                         top1_in_top1_prob = top1_in_top1_sum / val_samples
                         top1_in_top2_prob = top1_in_top2_sum / val_samples
                         top1_in_top3_prob = top1_in_top3_sum / val_samples
                     else:
-                        avg_val_loss = 0.0
+                        avg_val_mse_loss = 0.0
+                        avg_val_lm_loss = 0.0
+                        avg_val_total_loss = 0.0
                         top1_in_top1_prob = 0.0
                         top1_in_top2_prob = 0.0
                         top1_in_top3_prob = 0.0
 
-                    logger.info(f"[Global Step {global_step}] Val Loss: {avg_val_loss:.4f}")
+                    logger.info(f"[Global Step {global_step}] Val MSE Loss: {avg_val_mse_loss:.4f}")
+                    if head is not None:
+                        logger.info(f"[Global Step {global_step}] Val LM Loss: {avg_val_lm_loss:.4f}")
+                        logger.info(f"[Global Step {global_step}] Val Total Loss: {avg_val_total_loss:.4f}")
                     logger.info(f"[Global Step {global_step}] Top1 in Top1: {top1_in_top1_prob:.4f}")
                     logger.info(f"[Global Step {global_step}] Top1 in Top2: {top1_in_top2_prob:.4f}")
                     logger.info(f"[Global Step {global_step}] Top1 in Top3: {top1_in_top3_prob:.4f}")
 
                     if accelerator.is_main_process:
-                        wandb.log({
-                            "val_loss": avg_val_loss,
+                        log_data = {
+                            "val_loss": avg_val_mse_loss,
+                            "val_total_loss": avg_val_total_loss,
                             "top1_in_top1_accuracy": top1_in_top1_prob,
                             "top1_in_top2_accuracy": top1_in_top2_prob,
                             "top1_in_top3_accuracy": top1_in_top3_prob,
                             "global_step": global_step,
-                            # 记录学习率
                             "learning_rate": scheduler.get_last_lr()[0]
-                        })
+                        }
+                        if head is not None:
+                            log_data["val_lm_loss"] = avg_val_lm_loss
+                        wandb.log(log_data)
 
                     model.train()
 
-            # 提前退出
             if global_step >= args.max_train_steps:
                 break
 
@@ -535,7 +594,6 @@ def main():
 
     logger.info("Training loop complete.")
 
-    # 可选：保存最终模型
     if accelerator.is_main_process:
         final_path = os.path.join(project_dir, "pytorch_model_final.bin")
         torch.save(accelerator.unwrap_model(model).state_dict(), final_path)

@@ -2,7 +2,7 @@ cd ..
 
 python train_hidden_state_diffuser_v3_scheduler.py \
   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
-  --beta_schedule cosine \
+  --beta_schedule squaredcos_cap_v2 \
   --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
   --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
   --model_module my_hidden_state_diffusion_v1_concat \
@@ -14,7 +14,7 @@ python train_hidden_state_diffuser_v3_scheduler.py \
 
 python train_hidden_state_diffuser_v3_scheduler.py \
   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
-  --beta_schedule cosine \
+  --beta_schedule squaredcos_cap_v2 \
   --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
   --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
   --model_module my_hidden_state_diffusion_v1_concat \
@@ -26,7 +26,7 @@ python train_hidden_state_diffuser_v3_scheduler.py \
 
 python train_hidden_state_diffuser_v3_scheduler.py \
   --data_dir /home/5/uu02155/data/llama/eagle_new/eagle/reflectio/draft_train_data \
-  --beta_schedule cosine \
+  --beta_schedule squaredcos_cap_v2 \
   --basepath /home/5/uu02155/data/llama/eagle_new/base_model/Meta-Llama-3-8B-Instruct \
   --checkpointing_steps 100 --train_batch_size 32768 --warmup_steps 1000 \
   --model_module my_hidden_state_diffusion_v1_concat \
